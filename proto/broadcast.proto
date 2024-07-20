@@ -11,5 +11,6 @@ service Broadcaster {
 message SubscribeRequest{}
 
 message BroadcastMessage {
-  string content = 1;
+  int64 id = 1;
+  string content = 2;
 }

@@ -17,15 +17,29 @@ import (
 )
 
 var (
-	connectionCounts int64
+	batchSize                  = 1000
+	batchTimeout               = 500 * time.Millisecond
+	connectionsPerSecond       = 100
+	currentCount         int64 = 0
 )
 
 type Server struct {
 	broadcasts.UnimplementedBroadcasterServer
-	redisClient *redis.Client
-	mu          sync.RWMutex
-	clients     map[string]chan *broadcasts.BroadcastMessage
-	done        struct{}
+	redisClient       *redis.Client
+	mu                sync.RWMutex
+	clients           map[string]chan *broadcasts.BroadcastMessage
+	done              struct{}
+	newConnections    chan broadcasts.Broadcaster_SubscribeServer
+	connectionBatches chan []broadcasts.Broadcaster_SubscribeServer
+	broadcastChannel  chan *broadcasts.BroadcastMessage
+	messageCounter    int64
+	messageStats      map[int64]*MessageStats
+	statsMu           sync.RWMutex
+}
+
+type MessageStats struct {
+	TotalClients int
+	SentCount    int64
 }
 
 func NewServer(redisAddr string) *Server {
@@ -35,7 +49,11 @@ func NewServer(redisAddr string) *Server {
 			Password: "",
 			DB:       0,
 		}),
-		clients: make(map[string]chan *broadcasts.BroadcastMessage),
+		clients:           make(map[string]chan *broadcasts.BroadcastMessage),
+		newConnections:    make(chan broadcasts.Broadcaster_SubscribeServer, 100000),
+		connectionBatches: make(chan []broadcasts.Broadcaster_SubscribeServer, 1000),
+		broadcastChannel:  make(chan *broadcasts.BroadcastMessage, 100000),
+		messageStats:      make(map[int64]*MessageStats),
 	}
 }
 
@@ -60,7 +78,7 @@ func main() {
 	// Configure keepalive and other options
 	opts := []grpc.ServerOption{
 		grpc.KeepaliveParams(keepalive.ServerParameters{
-			MaxConnectionIdle: 15 * time.Minute,
+			MaxConnectionIdle: 20 * time.Minute,
 			Time:              5 * time.Second,
 			Timeout:           1 * time.Second,
 		}),
@@ -87,7 +105,15 @@ func main() {
 
 	broadcasts.RegisterBroadcasterServer(s, server)
 
-	go server.StartRedisSubscriber(context.Background())
+	context, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go server.StartRedisSubscriber(context)
+	go server.batchConnections()
+	go server.handleConnections(runtime.NumCPU() * 2)
+	go server.handleBroadcasts(runtime.NumCPU() / 2)
+	go server.monitorMessageStats()
+
 	log.Println("started grpc on port: 50051")
 	if err := s.Serve(lis); err != nil {
 		log.Fatalf("failed to serve: %v", err)
@@ -96,15 +122,63 @@ func main() {
 }
 
 func (s *Server) Subscribe(_ *broadcasts.SubscribeRequest, stream broadcasts.Broadcaster_SubscribeServer) error {
-	clientID := generateUniqueID()
-	log.Printf("New client subscribed: %s", clientID)
-	clientChan := make(chan *broadcasts.BroadcastMessage, 1000000)
+	s.newConnections <- stream
+	<-stream.Context().Done()
+	return nil
+}
 
-	s.mu.Lock()
-	s.clients[clientID] = clientChan
-	atomic.AddInt64(&connectionCounts, 1)
-	s.mu.Unlock()
+func (s *Server) batchConnections() {
+	var batch []broadcasts.Broadcaster_SubscribeServer
+	timer := time.NewTimer(batchTimeout)
+	rateLimiter := time.NewTicker(time.Second / time.Duration(connectionsPerSecond))
 
+	for {
+		select {
+		case <-rateLimiter.C:
+			select {
+			case conn := <-s.newConnections:
+				batch = append(batch, conn)
+				if len(batch) >= batchSize {
+					s.connectionBatches <- batch
+					batch = nil
+					timer.Reset(batchTimeout)
+				}
+			default:
+
+			}
+		case <-timer.C:
+			if len(batch) > 0 {
+				s.connectionBatches <- batch
+				batch = nil
+			}
+			timer.Reset(batchTimeout)
+		}
+	}
+}
+
+func (s *Server) handleConnections(workers int) {
+	for i := 0; i < workers; i++ {
+		go func() {
+			for batch := range s.connectionBatches {
+				for _, stream := range batch {
+					clientID := generateUniqueID()
+					clientChan := make(chan *broadcasts.BroadcastMessage, 100)
+
+					s.mu.Lock()
+					s.clients[clientID] = clientChan
+					atomic.AddInt64(&currentCount, 1)
+					s.mu.Unlock()
+
+					log.Printf("New client subscribed: %s, currentCount: %d", clientID, currentCount)
+
+					go s.handleClientStream(clientID, clientChan, stream)
+				}
+			}
+		}()
+	}
+}
+
+func (s *Server) handleClientStream(clientID string, clientChan chan *broadcasts.BroadcastMessage, stream broadcasts.Broadcaster_SubscribeServer) {
 	defer func() {
 		s.mu.Lock()
 		delete(s.clients, clientID)
@@ -113,20 +187,11 @@ func (s *Server) Subscribe(_ *broadcasts.SubscribeRequest, stream broadcasts.Bro
 		log.Printf("Client unsubscribed: %s", clientID)
 	}()
 
-	go func() {
-		for msg := range clientChan {
-			log.Printf("Sending message to client %s: %s", clientID, msg.Content)
-			if err := stream.Send(msg); err != nil {
-				log.Printf("Error sending message to client %s: %v", clientID, err)
-				continue
-			}
+	for msg := range clientChan {
+		if err := stream.Send(msg); err != nil {
+			log.Printf("Error sending message to client %s: %v", clientID, err)
+			return
 		}
-	}()
-
-	select {
-	case <-stream.Context().Done():
-		log.Printf("Client context done: %s", clientID)
-		return stream.Context().Err()
 	}
 }
 
@@ -137,36 +202,65 @@ func (s *Server) StartRedisSubscriber(ctx context.Context) {
 	log.Println("Started Redis subscriber")
 
 	ch := pubsub.Channel()
-	log.Println("Waiting for messages...")
 	for msg := range ch {
-		log.Printf("Received message from Redis: %s", msg.Payload)
-		broadcastMsg := &broadcasts.BroadcastMessage{Content: msg.Payload}
-		s.mu.RLock()
-		for clientID, clientChan := range s.clients {
-			select {
-			case clientChan <- broadcastMsg:
-				log.Printf("Queued message for client %s", clientID)
-			default:
-				log.Printf("Warning: Broadcast channel for client %s is full", clientID)
+		messageID := atomic.AddInt64(&s.messageCounter, 1)
+		log.Printf("Received message from Redis: %s (ID: %d)", msg.Payload, messageID)
+
+		s.statsMu.Lock()
+		s.messageStats[messageID] = &MessageStats{TotalClients: len(s.clients)}
+		s.statsMu.Unlock()
+
+		broadcastMsg := &broadcasts.BroadcastMessage{
+			Content: msg.Payload,
+			Id:      messageID,
+		}
+		s.broadcastChannel <- broadcastMsg
+	}
+}
+
+func (s *Server) handleBroadcasts(workers int) {
+	for i := 0; i < workers; i++ {
+		go func() {
+			for msg := range s.broadcastChannel {
+				s.mu.RLock()
+				clientCount := len(s.clients)
+				for _, clientChan := range s.clients {
+					select {
+					case clientChan <- msg:
+						atomic.AddInt64(&s.messageStats[msg.Id].SentCount, 1)
+					default:
+						// Channel full, skip this client
+						log.Printf("Warning: Client channel full, skipping message %d", msg.Id)
+					}
+				}
+				s.mu.RUnlock()
+
+				// Check if all clients received the message
+				if atomic.LoadInt64(&s.messageStats[msg.Id].SentCount) == int64(clientCount) {
+					log.Printf("Message %d successfully sent to all %d clients", msg.Id, clientCount)
+					s.statsMu.Lock()
+					delete(s.messageStats, msg.Id)
+					s.statsMu.Unlock()
+				}
+			}
+		}()
+	}
+}
+
+func (s *Server) monitorMessageStats() {
+	ticker := time.NewTicker(5 * time.Second)
+	for range ticker.C {
+		s.statsMu.RLock()
+		for msgID, stats := range s.messageStats {
+			sentCount := atomic.LoadInt64(&stats.SentCount)
+			if sentCount < int64(stats.TotalClients) {
+				log.Printf("Warning: Message %d sent to %d/%d clients", msgID, sentCount, stats.TotalClients)
 			}
 		}
-		s.mu.RUnlock()
+		s.statsMu.RUnlock()
 	}
 }
 
 func generateUniqueID() string {
 	return fmt.Sprintf("client-%d", time.Now().UnixNano())
 }
-
-//// monitor for create transfer service
-//func (s *Server) monitorProgress() {
-//	ticker := time.NewTicker(3 * time.Second)
-//	defer ticker.Stop()
-//
-//	for {
-//		select {
-//		case <-ticker.C:
-//			fmt.Printf("total connections: %d\n", atomic.LoadInt64(&connectionCounts))
-//		}
-//	}
-//}
