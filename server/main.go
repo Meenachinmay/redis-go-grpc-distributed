@@ -19,7 +19,7 @@ import (
 var (
 	batchSize                  = 1000
 	batchTimeout               = 500 * time.Millisecond
-	connectionsPerSecond       = 100
+	connectionsPerSecond       = 1000
 	currentCount         int64 = 0
 )
 

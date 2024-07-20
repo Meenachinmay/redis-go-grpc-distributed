@@ -12,7 +12,7 @@ import (
 )
 
 const (
-	totalClients         = 20000
+	totalClients         = 30000
 	connectionsPerSecond = 1000
 )
 
