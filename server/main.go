@@ -9,8 +9,15 @@ import (
 	"google.golang.org/grpc/keepalive"
 	"log"
 	"net"
+	"runtime"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
+)
+
+var (
+	connectionCounts int64
 )
 
 type Server struct {
@@ -18,6 +25,7 @@ type Server struct {
 	redisClient *redis.Client
 	mu          sync.RWMutex
 	clients     map[string]chan *broadcasts.BroadcastMessage
+	done        struct{}
 }
 
 func NewServer(redisAddr string) *Server {
@@ -32,6 +40,18 @@ func NewServer(redisAddr string) *Server {
 }
 
 func main() {
+	// Increase file descriptor limit
+	var rLimit syscall.Rlimit
+	if err := syscall.Getrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		log.Println("Error getting Rlimit:", err)
+	}
+	rLimit.Cur = rLimit.Max
+	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
+		log.Println("Error setting Rlimit:", err)
+	}
+	// Increase the number of operating system threads
+	runtime.GOMAXPROCS(runtime.NumCPU())
+
 	lis, err := net.Listen("tcp", ":50051")
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
@@ -78,10 +98,11 @@ func main() {
 func (s *Server) Subscribe(_ *broadcasts.SubscribeRequest, stream broadcasts.Broadcaster_SubscribeServer) error {
 	clientID := generateUniqueID()
 	log.Printf("New client subscribed: %s", clientID)
-	clientChan := make(chan *broadcasts.BroadcastMessage, 100)
+	clientChan := make(chan *broadcasts.BroadcastMessage, 1000000)
 
 	s.mu.Lock()
 	s.clients[clientID] = clientChan
+	atomic.AddInt64(&connectionCounts, 1)
 	s.mu.Unlock()
 
 	defer func() {
@@ -136,3 +157,16 @@ func (s *Server) StartRedisSubscriber(ctx context.Context) {
 func generateUniqueID() string {
 	return fmt.Sprintf("client-%d", time.Now().UnixNano())
 }
+
+//// monitor for create transfer service
+//func (s *Server) monitorProgress() {
+//	ticker := time.NewTicker(3 * time.Second)
+//	defer ticker.Stop()
+//
+//	for {
+//		select {
+//		case <-ticker.C:
+//			fmt.Printf("total connections: %d\n", atomic.LoadInt64(&connectionCounts))
+//		}
+//	}
+//}

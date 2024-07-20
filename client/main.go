@@ -11,7 +11,7 @@ import (
 
 func main() {
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < 10000; i++ {
 		wg.Add(1)
 		go func(id int) {
 			defer wg.Done()
@@ -23,7 +23,8 @@ func main() {
 
 func runClient(id int) {
 	log.Printf("Client %d attempting to connect", id)
-	conn, err := grpc.Dial("localhost:80", grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := grpc.Dial("localhost:80", grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithDefaultServiceConfig(`{"loadBalancingPolicy":"round_robin"}`))
 	if err != nil {
 		log.Printf("Client %d failed to connect: %v", id, err)
 		return
