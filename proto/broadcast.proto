@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package broadcast;
+
+option go_package = "/broadcasts";
+
+service Broadcaster {
+  rpc Subscribe(SubscribeRequest) returns (stream BroadcastMessage) {}
+}
+
+message SubscribeRequest{}
+
+message BroadcastMessage {
+  string content = 1;
+}
