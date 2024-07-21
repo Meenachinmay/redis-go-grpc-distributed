@@ -24,7 +24,7 @@ func main() {
 	//go monitorConnections(&connectedClients)
 
 	// Rate limiter for connection
-	rateLimiter := time.NewTicker(time.Second / time.Duration(connectionsPerSecond))
+	rateLimiter := time.NewTicker(time.Millisecond * 10)
 	//rateLimiter := time.NewTicker(time.Millisecond * 100)
 	for i := 1; i <= totalClients; i++ {
 		<-rateLimiter.C // Wait for the rate limiter
