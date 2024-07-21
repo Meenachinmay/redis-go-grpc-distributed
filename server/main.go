@@ -18,8 +18,8 @@ import (
 
 var (
 	batchSize                  = 1000
-	batchTimeout               = 500 * time.Millisecond
-	connectionsPerSecond       = 1000
+	batchTimeout               = 100 * time.Millisecond
+	connectionsPerSecond       = 2000
 	currentCount         int64 = 0
 )
 
@@ -51,7 +51,7 @@ func NewServer(redisAddr string) *Server {
 		}),
 		clients:           make(map[string]chan *broadcasts.BroadcastMessage),
 		newConnections:    make(chan broadcasts.Broadcaster_SubscribeServer, 100000),
-		connectionBatches: make(chan []broadcasts.Broadcaster_SubscribeServer, 1000),
+		connectionBatches: make(chan []broadcasts.Broadcaster_SubscribeServer, 10000),
 		broadcastChannel:  make(chan *broadcasts.BroadcastMessage, 100000),
 		messageStats:      make(map[int64]*MessageStats),
 	}
