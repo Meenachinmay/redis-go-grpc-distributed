@@ -6,7 +6,7 @@ services:
     ports:
       - "50051"
     deploy:
-      replicas: 5
+      replicas: 3
       restart_policy:
         condition: on-failure
       resources:
@@ -20,12 +20,23 @@ services:
         soft: 65536
         hard: 65536
 
-  nginx:
-    image: nginx:latest
+#  nginx:
+#    image: nginx:latest
+#    ports:
+#      - "80:80"
+#    volumes:
+#      - ./nginx.conf:/etc/nginx/nginx.conf
+#    depends_on:
+#      - distributed-chat-service
+
+  envoy:
+    build:
+      context: .
+      dockerfile: Dockerfile.envoy
     ports:
       - "80:80"
     volumes:
-      - ./nginx.conf:/etc/nginx/nginx.conf
+      - ./envoy.yaml:/etc/envoy/envoy.yaml
     depends_on:
       - distributed-chat-service
 
