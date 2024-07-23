@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/keepalive"
+	"google.golang.org/grpc/status"
 	"log"
 	"net"
 	"runtime"
@@ -17,9 +19,9 @@ import (
 )
 
 var (
-	batchSize                  = 1000
+	batchSize                  = 100
 	batchTimeout               = 100 * time.Millisecond
-	connectionsPerSecond       = 2000
+	connectionsPerSecond       = 5000
 	currentCount         int64 = 0
 )
 
@@ -122,7 +124,12 @@ func main() {
 }
 
 func (s *Server) Subscribe(_ *broadcasts.SubscribeRequest, stream broadcasts.Broadcaster_SubscribeServer) error {
-	s.newConnections <- stream
+	select {
+	case s.newConnections <- stream:
+		// Connection accepted
+	case <-time.After(5 * time.Second):
+		return status.Error(codes.ResourceExhausted, "server is at capacity, please try again later")
+	}
 	<-stream.Context().Done()
 	return nil
 }
