@@ -6,13 +6,13 @@ services:
     ports:
       - "50051"
     deploy:
-      replicas: 3
+      replicas: 2
       restart_policy:
         condition: on-failure
       resources:
           limits:
-            cpus: '2'      # Limit to 2 CPU cores
-            memory: '2g'   # Limit to 4GB of memory
+            cpus: '4'      # Limit to 2 CPU cores
+            memory: '4g'   # Limit to 4GB of memory
     environment:
       - GOMAXPROCS=14
     ulimits:

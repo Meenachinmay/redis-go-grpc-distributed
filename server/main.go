@@ -69,6 +69,9 @@ func main() {
 	if err := syscall.Setrlimit(syscall.RLIMIT_NOFILE, &rLimit); err != nil {
 		log.Println("Error setting Rlimit:", err)
 	}
+
+	go print(rLimit)
+
 	// Increase the number of operating system threads
 	runtime.GOMAXPROCS(runtime.NumCPU())
 
@@ -121,6 +124,25 @@ func main() {
 		log.Fatalf("failed to serve: %v", err)
 	}
 
+}
+
+func print(rLimit syscall.Rlimit) {
+	ticker := time.NewTicker(5 * time.Second)
+
+	for range ticker.C {
+		log.Printf("Current rlimit: %d", rLimit.Cur)
+		log.Printf("Number of goroutines: %d", runtime.NumGoroutine())
+		var m runtime.MemStats
+		runtime.ReadMemStats(&m)
+		log.Printf("Alloc = %v MiB", bToMb(m.Alloc))
+		log.Printf("TotalAlloc = %v MiB", bToMb(m.TotalAlloc))
+		log.Printf("Sys = %v MiB", bToMb(m.Sys))
+		log.Printf("NumGC = %v", m.NumGC)
+	}
+}
+
+func bToMb(b uint64) uint64 {
+	return b / 1024 / 1024
 }
 
 func (s *Server) Subscribe(_ *broadcasts.SubscribeRequest, stream broadcasts.Broadcaster_SubscribeServer) error {
